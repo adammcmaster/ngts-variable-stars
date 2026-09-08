@@ -1231,11 +1231,14 @@ dependencies = [
     { name = "pandas" },
     { name = "pyarrow" },
     { name = "pyfftw" },
+    { name = "pyvo" },
+    { name = "requests" },
     { name = "scikit-learn" },
     { name = "scipy" },
     { name = "torch" },
     { name = "tqdm" },
     { name = "upsilont" },
+    { name = "urllib3" },
 ]
 
 [package.dev-dependencies]
@@ -1258,11 +1261,14 @@ requires-dist = [
     { name = "pandas", specifier = ">=2.2,<3" },
     { name = "pyarrow", specifier = ">=17" },
     { name = "pyfftw", specifier = ">=0.15,<0.16" },
+    { name = "pyvo", specifier = ">=1.6,<2" },
+    { name = "requests", specifier = ">=2.32,<3" },
     { name = "scikit-learn", specifier = "==1.5.0" },
     { name = "scipy", specifier = ">=1.13,<2" },
     { name = "torch", specifier = ">=2.6,<3" },
     { name = "tqdm", specifier = ">=4.66,<5" },
     { name = "upsilont", git = "https://github.com/dwkim78/UPSILoN-T?rev=2d95da6b52104e3461958d6c7c6dfecf3bb9bba3" },
+    { name = "urllib3", specifier = ">=2,<3" },
 ]
 
 [package.metadata.requires-dev]

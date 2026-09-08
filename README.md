@@ -83,6 +83,41 @@ Upstream's saved label encoder emits a scikit-learn version warning (saved with
 0.22, upstream now requires 1.5.0); this smoke test reproduces the documented
 prediction, but does not validate classification accuracy on NGTS data.
 
-NGTS archive access and the survey search pipeline are not configured yet. The
-initial pipeline will need to prepare time, magnitude and magnitude-uncertainty
-arrays from NGTS photometry before extracting features and classifying candidates.
+## Initialise the NGTS DR2 data
+
+```bash
+uv run python init_manifest.py
+```
+
+This queries ESO's ObsCore service for DR2, checks that all 72 fields and 1,800
+photometry tiles are present, and downloads the 72 field source catalogues. It
+does not download the photometry tiles. All output goes under `data/` beside the
+script, following the workstation's symlink to scratch. Use `--data-dir PATH` to
+choose another location.
+
+| Output | Contents |
+| --- | --- |
+| `data/catalogues/` | Original source catalogue FITS files, with FITS integrity checks |
+| `data/source_catalogue.parquet` | Combined source catalogue, retaining all original columns and adding `FIELD` |
+| `data/source_catalogue_manifest.csv` | Catalogue URLs, local paths, row counts, byte sizes and SHA-256 hashes |
+| `data/tile_manifest.csv` | Tile fields/letters, ESO dataset IDs, download and DataLink URLs, estimated sizes, positions, observing bounds and cache paths |
+| `data/archive_products.ecsv` | Original ESO product metadata, including units |
+| `data/manifest_metadata.json` | Release provenance, query, timestamp and counts |
+| `data/tiles/` | Cache directory for subsequent tile processing |
+
+`cache_path` values are relative to `data/`; downstream code should use
+`data_dir / row.cache_path`. Tile sizes are ESO estimates in **decimal kilobytes**,
+not exact byte counts. The manifest contains inventory rather than mutable
+processing status, so rerunning initialisation will not reset processing state.
+Existing valid catalogue files are reused; interrupted downloads never replace
+complete files. Generated files are replaced atomically, with the metadata JSON
+written last after a successful run. Run only one initialiser at a time.
+
+The combined catalogue preserves field membership without deduplicating sources
+across fields. Source-to-tile membership should be taken from the actual
+photometry files when processing them. The source catalogue's pixel positions
+alone are not used to guess tile membership.
+
+The survey search pipeline still needs to prepare time, magnitude and
+magnitude-uncertainty arrays from NGTS photometry before extracting features and
+classifying candidates.
