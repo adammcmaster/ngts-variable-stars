@@ -54,7 +54,7 @@ def checkpoint_db(path, config):
         db.close()
         raise ValueError(
             "Checkpoint configuration differs (data, model, software or preprocessing). "
-            "Restore the previous settings, or move the existing upsilon-t output "
+            "Restore the previous settings, or move the existing classification output "
             "directory aside before starting a different run."
         )
     with db:

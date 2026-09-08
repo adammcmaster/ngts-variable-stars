@@ -9,6 +9,7 @@ dependencies = [
     "astroquery>=0.4.7,<0.5",
     "h5py>=3.11,<4",
     "matplotlib>=3.9,<4",
+    "numba>=0.61,<1",
     # UPSILoN-T uses the legacy NumPy API in its feature extractor.
     "numpy>=1.26.4,<2",
     "pandas>=2.2,<3",

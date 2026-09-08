@@ -188,3 +188,55 @@ existing checkpoints would mix incompatible results. Move the output directory
 aside before starting a different configuration. `--min-period` passes through
 UPSILoN-T's period-search parameter (default 0.03 days); upstream's internal
 frequency-grid construction does not enforce it as a strict period cutoff.
+
+## Norton CLEAN and phase-folding search
+
+```bash
+uv run python classify_norton.py
+```
+
+This is a Python port of Andrew Norton's SuperWASP Variable Stars period detector
+([DOI: 10.3847/2515-5172/aaf291](https://doi.org/10.3847/2515-5172/aaf291)), using
+both CLEAN and the local phase-folding search from his supplied `runfindper6.f`.
+It runs on CPU, with Numba accelerating the numerical loops. The first invocation
+may spend a few seconds compiling those loops.
+
+Like the UPSILoN-T script, it reads the tile manifest, defaults to 5-minute flux
+bins and quality mask 23, displays tqdm progress, and resumes automatically. It
+requires at least 1,000 usable points after NGTS binning, before Norton's own spike
+removal. Use `--bin-minutes 0` for native cadence. It stores its tile cache under
+`data/tiles/norton/` so independent Norton and UPSILoN-T runs do not delete or
+partially overwrite each other's files. Completed Norton tiles are removed unless
+`--keep-tiles` is selected.
+
+Outputs are under `data/classifications/norton/`:
+
+| File | Contents |
+| --- | --- |
+| `checkpoints.sqlite` | Per-source outcomes, CLEAN candidates and progress through candidate refinements |
+| `tiles/{FIELD}{LETTER}.parquet` | One source-summary row, with the same identifiers, status, counts, label and probability columns as UPSILoN-T, plus the best period and detection statistics |
+| `periods/{FIELD}{LETTER}.parquet` | Every accepted period, its CLEAN significance, folding ratio, warning flag and JSON-encoded 100-bin folded profile |
+| `run_config.json` | DOI, algorithm settings, source/code hashes, dependencies and manifest provenance |
+| `summary.json` | Counts from the last normally completed invocation; SQLite is authoritative after a crash |
+
+Norton's algorithm detects periodicity rather than physical stellar classes.
+The labels are `periodic_candidate` (at least one accepted unflagged period),
+`alias_only` (all accepted periods have Norton warning flags), and `no_period`.
+`no_period` is not evidence that a star is non-variable. `probability` is null;
+this algorithm supplies no calibrated class probability. A source summary picks
+the highest folding ratio among unflagged periods, or among all accepted periods
+if none is unflagged. The complete period table preserves Norton's descending
+period order and numbered candidates. Periods are stored in both days and seconds.
+
+CLEAN candidates are checkpointed before folding, and each candidate refinement
+is committed independently. A failure during CLEAN repeats only the current
+source's CLEAN stage; a failure during refinement resumes at that candidate.
+Completed sources are reused. Both Parquet exports must be written before a tile
+is marked complete or its cache is removed. `--max-sources`, `--max-tiles`,
+`--retry-errors`, `--keep-tiles`, and `--data-dir` work as in the UPSILoN-T script.
+Only one Norton process may write to a given output directory. Changing numerical
+settings, source code, relevant dependencies or the manifest requires a separate
+output run (move the existing Norton output directory aside).
+
+See [the port notes](docs/norton_port.md) for the original thresholds, numerical
+repairs, retained legacy behaviours and validation against the supplied Fortran.
