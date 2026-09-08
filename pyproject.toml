@@ -1,0 +1,37 @@
+[project]
+name = "ngts-variable-stars"
+version = "0.1.0"
+description = "Search NGTS photometry archives for variable stars."
+readme = "README.md"
+requires-python = ">=3.11,<3.12"
+dependencies = [
+    "astropy>=6,<8",
+    "astroquery>=0.4.7,<0.5",
+    "h5py>=3.11,<4",
+    "matplotlib>=3.9,<4",
+    # UPSILoN-T uses the legacy NumPy API in its feature extractor.
+    "numpy>=1.26.4,<2",
+    "pandas>=2.2,<3",
+    "pyarrow>=17",
+    "pyfftw>=0.15,<0.16",
+    "scikit-learn==1.5.0",
+    "scipy>=1.13,<2",
+    "torch>=2.6,<3",
+    "tqdm>=4.66,<5",
+    "upsilont",
+]
+
+[dependency-groups]
+dev = ["pytest>=8,<10", "ruff>=0.11"]
+notebooks = ["ipykernel>=6,<8", "jupyterlab>=4,<5"]
+
+[tool.uv]
+package = false
+default-groups = ["dev", "notebooks"]
+
+[tool.uv.sources]
+upsilont = { git = "https://github.com/dwkim78/UPSILoN-T", rev = "2d95da6b52104e3461958d6c7c6dfecf3bb9bba3" }
+
+[tool.ruff]
+target-version = "py311"
+line-length = 88
