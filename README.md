@@ -118,6 +118,73 @@ across fields. Source-to-tile membership should be taken from the actual
 photometry files when processing them. The source catalogue's pixel positions
 alone are not used to guess tile membership.
 
-The survey search pipeline still needs to prepare time, magnitude and
-magnitude-uncertainty arrays from NGTS photometry before extracting features and
-classifying candidates.
+## Classify the photometry
+
+Run with access to the host NVIDIA GPU:
+
+```bash
+uv run python classify_upsilont.py
+```
+
+The script works through `data/tile_manifest.csv` in order. It downloads one tile
+into `data/tiles/`, validates its FITS identity and checksums, groups measurements
+by source, extracts UPSILoN-T features on the CPU, and predicts classes in GPU
+batches. tqdm displays overall tile progress, download bytes, and source progress.
+
+Preprocessing defaults to **5-minute inverse-variance weighted flux bins**. All
+finite, positive fluxes with finite, positive uncertainties are eligible. The
+default rejection mask is 23 (bits 0, 1, 2 and 4: saturation, cosmic rays,
+crossings and blooming spikes). Outlier-only flags are retained to avoid removing
+real variability. No additional sigma clipping is performed. Times are sorted,
+duplicate times are combined, and fluxes are converted to relative magnitudes
+with propagated magnitude errors. At least 80 usable points after binning are
+required. Times remain in days, with a constant HJD offset subtracted for numerical
+conditioning. Binning smooths short signals and changes the classifier's features;
+these first-pass classifications need scientific validation on NGTS.
+
+All results and checkpoints are under `data/classifications/upsilon-t/`:
+
+| File | Purpose |
+| --- | --- |
+| `checkpoints.sqlite` | Authoritative per-source results, feature checkpoints and completed-tile records |
+| `tiles/{FIELD}{LETTER}.parquet` | Export for each completed tile, including source IDs, statuses, counts, features, predicted labels and all class probabilities |
+| `run_config.json` | Preprocessing settings, package versions, feature/class order, model hashes and manifest hash |
+| `summary.json` | Counts as of the last normally completed invocation (the SQLite checkpoint remains current after a crash) |
+
+Each source's features are committed before inference; predictions are committed
+individually. Rerunning the **same command automatically resumes**: completed
+sources are skipped, extracted features awaiting prediction are reused, and
+partial downloads use HTTP range requests. A tile is marked complete only after
+all its sources have a recorded outcome and its Parquet export is saved. Completed
+tile files are then deleted from the cache; use `--keep-tiles` to retain them.
+The SQLite database includes results for the current incomplete tile, even before
+its Parquet export exists. A file lock prevents concurrent writers.
+
+Every source gets an explicit outcome: `classified`, `skipped`, or `error`.
+Skipped sources include insufficient/constant light curves, nonfinite features,
+and features outside the pretrained model's log-transform domain. In the latter
+case the raw features and violated bounds are retained; they are not silently
+clipped to force a prediction. Numerical extraction errors are recorded with a
+reason; `--retry-errors` retries those sources. GPU, I/O and unexpected programming
+failures stop the run, retaining the checkpoints. Completed-tile counts include
+skipped/error outcomes, so inspect the status and reason columns when analysing
+results.
+
+Useful options:
+
+```bash
+# Stop after one additional tile, or a few additional unfinished sources.
+uv run python classify_upsilont.py --max-tiles 1
+uv run python classify_upsilont.py --max-sources 5
+
+# Adjust CPU FFT threads and GPU batch size without resetting checkpoints.
+uv run python classify_upsilont.py --fft-threads 4 --batch-size 32
+```
+
+`--bin-minutes 0` selects native cadence, which can require very large FFTs and
+substantial RAM. `--reject-flags 31` also excludes outlier-flagged measurements.
+Changing preprocessing, model/package versions, or the manifest is rejected when
+existing checkpoints would mix incompatible results. Move the output directory
+aside before starting a different configuration. `--min-period` passes through
+UPSILoN-T's period-search parameter (default 0.03 days); upstream's internal
+frequency-grid construction does not enforce it as a strict period cutoff.
