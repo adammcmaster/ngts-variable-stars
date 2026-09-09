@@ -11,6 +11,7 @@ import warnings
 from contextlib import contextmanager
 from datetime import UTC, datetime
 from importlib.metadata import version
+from multiprocessing import get_context
 from pathlib import Path
 
 import numpy as np
@@ -18,7 +19,13 @@ import pandas as pd
 from astropy.io import fits
 from tqdm import tqdm
 
-from init_manifest import ArchiveSession, write_atomic
+from classification_workers import (
+    WORKERS,
+    TilePrefetch,
+    source_results,
+    upsilon_source,
+)
+from init_manifest import write_atomic
 
 PIPELINE_VERSION = 1
 REQUIRED_COLUMNS = {"SOURCE_ID", "HJD", "SYSFLUX", "FLUX_ERR", "FLAG"}
@@ -48,9 +55,24 @@ def checkpoint_db(path, config):
         CREATE TABLE IF NOT EXISTS tiles (
             dp_id TEXT PRIMARY KEY, source_count INTEGER NOT NULL);
     """)
-    encoded = json.dumps(config, sort_keys=True)
+
+    # Older Norton checkpoints included code fingerprints. Ignore and retire
+    # those fields so source edits never prevent resuming existing results.
+    def without_source_hashes(settings):
+        return {
+            key: value
+            for key, value in settings.items()
+            if key
+            not in {"reference_source_sha256", "algorithm_sha256", "runner_sha256"}
+        }
+
+    encoded = json.dumps(without_source_hashes(config), sort_keys=True)
     saved = db.execute("SELECT value FROM settings WHERE key='config'").fetchone()
-    if saved and saved[0] != encoded:
+    if (
+        saved
+        and json.dumps(without_source_hashes(json.loads(saved[0])), sort_keys=True)
+        != encoded
+    ):
         db.close()
         raise ValueError(
             "Checkpoint configuration differs (data, model, software or preprocessing). "
@@ -58,7 +80,7 @@ def checkpoint_db(path, config):
             "directory aside before starting a different run."
         )
     with db:
-        db.execute("INSERT OR IGNORE INTO settings VALUES ('config', ?)", (encoded,))
+        db.execute("INSERT OR REPLACE INTO settings VALUES ('config', ?)", (encoded,))
     return db
 
 
@@ -391,13 +413,25 @@ def export_tile(db, record, output, config):
     return len(frame)
 
 
-def process_tile(db, record, data_dir, output, model, config, args, session, budget):
+def process_tile(
+    db,
+    record,
+    data_dir,
+    output,
+    model,
+    config,
+    args,
+    session,
+    budget,
+    pool=None,
+    tile_path=None,
+):
     if db.execute("SELECT 1 FROM tiles WHERE dp_id=?", (record["dp_id"],)).fetchone():
         export_tile(db, record, output, config)
         if not args.keep_tiles:
             (data_dir / record["cache_path"]).unlink(missing_ok=True)
         return 0, True
-    path = cache_tile(session, record, data_dir)
+    path = tile_path if tile_path is not None else cache_tile(session, record, data_dir)
     saved = {
         source_id: json.loads(payload)
         for source_id, payload in db.execute(
@@ -419,15 +453,36 @@ def process_tile(db, record, data_dir, output, model, config, args, session, bud
             desc=f"Sources {record['field']}{record['tile']}",
             leave=False,
         ) as progress:
-            for source_id, selection in groups:
-                if source_id in saved and saved[source_id]["status"] != "features":
-                    continue
-                if budget is not None and processed >= budget:
-                    break
-                payload = saved.get(source_id)
-                if payload is None:
-                    payload = extract_source(data[selection], config, args.fft_threads)
-                    save_result(db, record["dp_id"], source_id, payload)
+            unfinished = [
+                (source_id, selection)
+                for source_id, selection in groups
+                if source_id not in saved or saved[source_id]["status"] == "features"
+            ][:budget]
+
+            def results(data=data):
+                if pool is None:
+                    for source_id, selection in unfinished:
+                        yield (
+                            source_id,
+                            saved.get(source_id)
+                            or extract_source(
+                                data[selection], config, args.fft_threads
+                            ),
+                        )
+                else:
+                    # Resume durable features without repeating CPU extraction.
+                    for source_id, _ in unfinished:
+                        if source_id in saved:
+                            yield source_id, saved[source_id]
+                    tasks = (
+                        (path, source_id, selection, config, args.fft_threads)
+                        for source_id, selection in unfinished
+                        if source_id not in saved
+                    )
+                    yield from source_results(pool, upsilon_source, tasks)
+
+            for source_id, payload in results():
+                save_result(db, record["dp_id"], source_id, payload)
                 if payload["status"] == "features":
                     pending.append((source_id, payload))
                     if len(pending) >= args.batch_size:
@@ -435,6 +490,8 @@ def process_tile(db, record, data_dir, output, model, config, args, session, bud
                 processed += 1
                 progress.update(1)
             predict_pending(db, record, pending, model, config)
+        # Release the local generator function and its reference to the FITS data.
+        del results
         # Release all memory-mapped arrays before the cache file is unlinked.
         del data
     total, waiting = db.execute(
@@ -536,11 +593,13 @@ def run(args):
             consumed = 0
             completed_this_run = 0
             done = {row[0] for row in db.execute("SELECT dp_id FROM tiles")}
+            records = manifest.to_dict("records")
             with (
-                ArchiveSession() as session,
+                get_context("spawn").Pool(WORKERS) as pool,
+                TilePrefetch(records, done, data_dir, args.max_tiles) as prefetch,
                 tqdm(total=len(manifest), initial=len(done), desc="Tiles") as progress,
             ):
-                for record in manifest.to_dict("records"):
+                for record in records:
                     was_done = record["dp_id"] in done
                     if (
                         not was_done
@@ -563,8 +622,10 @@ def run(args):
                         model,
                         config,
                         args,
-                        session,
+                        None,
                         budget,
+                        pool=pool,
+                        tile_path=None if was_done else prefetch.take(record),
                     )
                     consumed += count
                     if complete and not was_done:
@@ -615,7 +676,7 @@ def main():
         default=0.03,
         help="UPSILoN-T min_period parameter, in days",
     )
-    parser.add_argument("--fft-threads", type=int, default=4)
+    parser.add_argument("--fft-threads", type=int, default=1)
     parser.add_argument(
         "--batch-size",
         type=int,

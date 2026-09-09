@@ -8,6 +8,7 @@ import json
 import re
 from datetime import UTC, datetime
 from importlib.metadata import version
+from multiprocessing import get_context
 from pathlib import Path
 
 import numpy as np
@@ -16,6 +17,12 @@ from astropy.io import fits
 from tqdm import tqdm
 
 import norton_algorithm as norton
+from classification_workers import (
+    WORKERS,
+    TilePrefetch,
+    norton_source,
+    source_results,
+)
 from classify_upsilont import (
     cache_tile,
     checkpoint_db,
@@ -23,10 +30,9 @@ from classify_upsilont import (
     save_result,
     source_groups,
 )
-from init_manifest import ArchiveSession, write_atomic
+from init_manifest import write_atomic
 
 DOI = "10.3847/2515-5172/aaf291"
-REFERENCE_SHA256 = "880553a992b286852bef8da34818a6121121b397ab5ac8e3f638ee3bf39e6289"
 
 
 def prepare_flux(rows, config):
@@ -70,7 +76,7 @@ def prepare_flux(rows, config):
     return (t, flux, error), counts, None
 
 
-def analyse_source(db, record, source_id, rows, config, saved=None):
+def analyse_source(db, record, source_id, rows, config, saved=None, show_progress=True):
     prepared, counts, reason = prepare_flux(rows, config)
     if reason:
         payload = {**counts, "status": "skipped", "reason": reason, "periods": []}
@@ -116,6 +122,7 @@ def analyse_source(db, record, source_id, rows, config, saved=None):
             total=len(payload["candidates"]),
             initial=payload["next_candidate"],
             desc=f"Refine {source_id}",
+            disable=not show_progress,
             leave=False,
         ) as progress:
             for i in range(payload["next_candidate"], len(payload["candidates"])):
@@ -295,7 +302,18 @@ def export_tile(db, record, output):
     )
 
 
-def process_tile(db, record, data_dir, output, config, args, session, budget):
+def process_tile(
+    db,
+    record,
+    data_dir,
+    output,
+    config,
+    args,
+    session,
+    budget,
+    pool=None,
+    tile_path=None,
+):
     # Separate cache ownership permits simultaneous UPSILoN-T/Norton runs.
     record = {**record, "cache_path": f"tiles/norton/{record['filename']}"}
     if db.execute("SELECT 1 FROM tiles WHERE dp_id=?", (record["dp_id"],)).fetchone():
@@ -307,7 +325,7 @@ def process_tile(db, record, data_dir, output, config, args, session, budget):
         if not args.keep_tiles:
             (data_dir / record["cache_path"]).unlink(missing_ok=True)
         return 0, True
-    path = cache_tile(session, record, data_dir)
+    path = tile_path if tile_path is not None else cache_tile(session, record, data_dir)
     saved = {
         source_id: json.loads(payload)
         for source_id, payload in db.execute(
@@ -327,15 +345,40 @@ def process_tile(db, record, data_dir, output, config, args, session, budget):
             desc=f"Sources {record['field']}{record['tile']}",
             leave=False,
         ) as progress:
-            for source_id, selection in groups:
-                previous = saved.get(source_id)
-                if previous and previous["status"] != "candidates":
-                    continue
-                if budget is not None and processed >= budget:
-                    break
-                analyse_source(db, record, source_id, data[selection], config, previous)
-                processed += 1
-                progress.update(1)
+            unfinished = [
+                (source_id, selection)
+                for source_id, selection in groups
+                if source_id not in saved or saved[source_id]["status"] == "candidates"
+            ][:budget]
+            if pool is None:
+                for source_id, selection in unfinished:
+                    analyse_source(
+                        db,
+                        record,
+                        source_id,
+                        data[selection],
+                        config,
+                        saved.get(source_id),
+                    )
+                    processed += 1
+                    progress.update(1)
+            else:
+                db_path = db.execute("PRAGMA database_list").fetchone()[2]
+                tasks = (
+                    (
+                        path,
+                        source_id,
+                        selection,
+                        config,
+                        record,
+                        db_path,
+                        saved.get(source_id),
+                    )
+                    for source_id, selection in unfinished
+                )
+                for _ in source_results(pool, norton_source, tasks):
+                    processed += 1
+                    progress.update(1)
         del data
     total, waiting = db.execute(
         "SELECT COUNT(*), SUM(status='candidates') FROM results WHERE dp_id=?",
@@ -379,13 +422,8 @@ def run(args):
         "pipeline_version": 1,
         "algorithm_name": "Norton CLEAN + phase folding",
         "doi": DOI,
-        "reference_source_sha256": REFERENCE_SHA256,
         "algorithm": norton.DEFAULTS,
         "manifest_sha256": hashlib.sha256(manifest_path.read_bytes()).hexdigest(),
-        "algorithm_sha256": hashlib.sha256(
-            Path(norton.__file__).read_bytes()
-        ).hexdigest(),
-        "runner_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
         "versions": {
             name: version(name) for name in ("numpy", "pandas", "astropy", "numba")
         },
@@ -425,11 +463,16 @@ def run(args):
             )
             done = {row[0] for row in db.execute("SELECT dp_id FROM tiles")}
             consumed, newly_complete = 0, 0
+            records = manifest.to_dict("records")
+            records = [
+                {**r, "cache_path": f"tiles/norton/{r['filename']}"} for r in records
+            ]
             with (
-                ArchiveSession() as session,
+                get_context("spawn").Pool(WORKERS) as pool,
+                TilePrefetch(records, done, data_dir, args.max_tiles) as prefetch,
                 tqdm(total=len(manifest), initial=len(done), desc="Tiles") as progress,
             ):
-                for record in manifest.to_dict("records"):
+                for record in records:
                     was_done = record["dp_id"] in done
                     if (
                         not was_done
@@ -445,7 +488,16 @@ def run(args):
                     if not was_done and budget is not None and budget <= 0:
                         break
                     count, complete = process_tile(
-                        db, record, data_dir, output, config, args, session, budget
+                        db,
+                        record,
+                        data_dir,
+                        output,
+                        config,
+                        args,
+                        None,
+                        budget,
+                        pool=pool,
+                        tile_path=None if was_done else prefetch.take(record),
                     )
                     consumed += count
                     if complete and not was_done:

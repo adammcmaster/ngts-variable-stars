@@ -128,8 +128,11 @@ uv run python classify_upsilont.py
 
 The script works through `data/tile_manifest.csv` in order. It downloads one tile
 into `data/tiles/`, validates its FITS identity and checksums, groups measurements
-by source, extracts UPSILoN-T features on the CPU, and predicts classes in GPU
-batches. tqdm displays overall tile progress, download bytes, and source progress.
+by source, extracts UPSILoN-T features in eight CPU worker processes, and predicts
+classes in GPU batches in the main process. A separate download process prefetches
+the next unfinished tile while the current tile is classified. At most one tile
+is prefetched; `--max-tiles` also limits prefetching. FFT extraction defaults to
+one thread per worker (`--fft-threads` controls this per-worker setting). tqdm displays overall tile progress, download bytes, and source progress.
 
 Preprocessing defaults to **5-minute inverse-variance weighted flux bins**. All
 finite, positive fluxes with finite, positive uncertainties are eligible. The
@@ -201,6 +204,10 @@ both CLEAN and the local phase-folding search from his supplied `runfindper6.f`.
 It runs on CPU, with Numba accelerating the numerical loops. The first invocation
 may spend a few seconds compiling those loops.
 
+Norton uses eight source-classification processes and one download process to
+prefetch the next tile. Each classification process writes durable candidate
+checkpoints through its own SQLite connection.
+
 Like the UPSILoN-T script, it reads the tile manifest, defaults to 5-minute flux
 bins and quality mask 23, displays tqdm progress, and resumes automatically. It
 requires at least 1,000 usable points after NGTS binning, before Norton's own spike
@@ -216,7 +223,7 @@ Outputs are under `data/classifications/norton/`:
 | `checkpoints.sqlite` | Per-source outcomes, CLEAN candidates and progress through candidate refinements |
 | `tiles/{FIELD}{LETTER}.parquet` | One source-summary row, with the same identifiers, status, counts, label and probability columns as UPSILoN-T, plus the best period and detection statistics |
 | `periods/{FIELD}{LETTER}.parquet` | Every accepted period, its CLEAN significance, folding ratio, warning flag and JSON-encoded 100-bin folded profile |
-| `run_config.json` | DOI, algorithm settings, source/code hashes, dependencies and manifest provenance |
+| `run_config.json` | DOI, algorithm settings, dependencies and manifest provenance |
 | `summary.json` | Counts from the last normally completed invocation; SQLite is authoritative after a crash |
 
 Norton's algorithm detects periodicity rather than physical stellar classes.
@@ -234,9 +241,11 @@ source's CLEAN stage; a failure during refinement resumes at that candidate.
 Completed sources are reused. Both Parquet exports must be written before a tile
 is marked complete or its cache is removed. `--max-sources`, `--max-tiles`,
 `--retry-errors`, `--keep-tiles`, and `--data-dir` work as in the UPSILoN-T script.
-Only one Norton process may write to a given output directory. Changing numerical
-settings, source code, relevant dependencies or the manifest requires a separate
-output run (move the existing Norton output directory aside).
+Only one Norton invocation (with its worker pool) may use a given output directory. Changing numerical
+settings, relevant dependencies or the manifest requires a separate
+output run (move the existing Norton output directory aside). Source-code changes
+do not block resuming; legacy source fingerprints are removed automatically when
+opening compatible checkpoints.
 
 See [the port notes](docs/norton_port.md) for the original thresholds, numerical
 repairs, retained legacy behaviours and validation against the supplied Fortran.

@@ -181,3 +181,35 @@ def test_tile_completion_exports_and_cache_isolation(
     assert calls == ["source"]
     assert (output / "tiles" / stem).exists()
     db.close()
+
+
+def test_legacy_source_fingerprints_do_not_block_resume(tmp_path, config):
+    path = tmp_path / "checkpoints.sqlite"
+    db = classifier.checkpoint_db(path, config)
+    payload = {"status": "candidates", "next_candidate": 1, "periods": []}
+    classifier.save_result(db, "ADP.1", "source", payload)
+    legacy = {
+        **config,
+        "reference_source_sha256": "old reference",
+        "algorithm_sha256": "old algorithm",
+        "runner_sha256": "old runner",
+    }
+    with db:
+        db.execute(
+            "UPDATE settings SET value=? WHERE key='config'", (json.dumps(legacy),)
+        )
+        db.execute("INSERT INTO tiles VALUES ('ADP.2', 5)")
+    db.close()
+
+    # Unrelated configuration differences still reject without altering the checkpoint.
+    with pytest.raises(ValueError, match="configuration differs"):
+        classifier.checkpoint_db(path, {**config, "bin_minutes": 10})
+    db = classifier.checkpoint_db(path, config)
+    assert (
+        json.loads(db.execute("SELECT payload FROM results").fetchone()[0]) == payload
+    )
+    assert db.execute("SELECT * FROM tiles").fetchall() == [("ADP.2", 5)]
+    assert json.loads(db.execute("SELECT value FROM settings").fetchone()[0]) == config
+    db.close()
+    # The normalized checkpoint remains reusable on later restarts.
+    classifier.checkpoint_db(path, config).close()

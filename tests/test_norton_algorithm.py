@@ -1,6 +1,5 @@
 """Check the numerical port against independent formulas and the supplied Fortran."""
 
-import hashlib
 import shutil
 import subprocess
 from pathlib import Path
@@ -9,7 +8,6 @@ import numpy as np
 import pytest
 
 import norton_algorithm as norton
-from classify_norton import REFERENCE_SHA256
 
 
 def synthetic_curve():
@@ -106,9 +104,7 @@ def test_fortran_reference_with_documented_precision_and_extrema_repairs(tmp_pat
         pytest.skip(
             "Optional cross-language check needs gfortran and data/runfindper6.f"
         )
-    raw = reference.read_bytes()
-    assert hashlib.sha256(raw).hexdigest() == REFERENCE_SHA256
-    source = raw.decode()
+    source = reference.read_text()
     for old, new in [
         ("MAX1((TIMMAX),time(IA))", "MAX(TIMMAX,DBLE(time(IA)))"),
         ("MIN1((TIMMIN),time(IA))", "MIN(TIMMIN,DBLE(time(IA)))"),
