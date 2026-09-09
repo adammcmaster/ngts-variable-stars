@@ -240,3 +240,19 @@ output run (move the existing Norton output directory aside).
 
 See [the port notes](docs/norton_port.md) for the original thresholds, numerical
 repairs, retained legacy behaviours and validation against the supplied Fortran.
+
+## Preview classifications
+
+Open `preview_upsilon.ipynb` or `preview_norton.ipynb` in Jupyter from the
+repository root and run all cells. Each reads a read-only SQLite snapshot,
+including results from unfinished tiles, shows category counts and processing
+statuses, and plots up to three examples per category from a single tile.
+Automatic selection prefers cached tiles, then category coverage. Set
+`PREVIEW_TILE` to a field+tile identifier to choose one explicitly (use the same
+value in both notebooks to share a tile). Counts cover the full run; categories
+missing from the selected tile have empty panels. Rerun to refresh.
+
+Missing photometry is downloaded into the separate `preview_cache/` directory;
+set `DOWNLOAD_MISSING = False` for offline use. Norton detections use their saved
+folded profiles. Its `no_period` examples use an explicitly labelled one-day
+reference fold, which does not imply a detected period.

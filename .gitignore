@@ -218,3 +218,5 @@ __marimo__/
 # Streamlit
 .streamlit/secrets.toml
 
+# Photometry downloaded by the preview notebooks
+preview_cache/
