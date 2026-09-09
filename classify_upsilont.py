@@ -17,6 +17,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 from astropy.io import fits
+from requests import RequestException
 from tqdm import tqdm
 
 from classification_workers import (
@@ -111,62 +112,61 @@ def validate_tile(path, filename):
             raise ValueError(f"Truncated or oversized tile: {path}")
 
 
-def cache_tile(session, record, data_dir):
+def cache_tile(session, record, data_dir, progress_factory=tqdm, report=None):
+    def status(message):
+        if report is not None:
+            report("status", message)
+
+    label = f"{record['field']}{record['tile']}"
     path = data_dir / record["cache_path"]
     path.parent.mkdir(parents=True, exist_ok=True)
     if path.exists():
         try:
+            status(f"Checking cached {label}")
             validate_tile(path, record["filename"])
             return path
         except (OSError, ValueError) as exc:
-            tqdm.write(f"Replacing invalid cached tile {path.name}: {exc}")
+            message = f"Replacing invalid cached tile {path.name}: {exc}"
+            if report is None:
+                tqdm.write(message)
+            else:
+                report("message", message)
             path.unlink()
     partial = path.with_name(path.name + ".part")
-    offset = partial.stat().st_size if partial.exists() else 0
+    if partial.exists():
+        status(f"Removing incomplete {label}")
+        partial.unlink()
     headers = {"Accept-Encoding": "identity"}
-    if offset:
-        headers["Range"] = f"bytes={offset}-"
-    with session.get(record["download_url"], headers=headers, stream=True) as response:
-        if response.status_code == 416 and offset:
-            # A previous download may have finished just before interruption.
-            try:
-                validate_tile(partial, record["filename"])
-            except (OSError, ValueError):
-                partial.unlink()
-                raise ValueError(
-                    f"Invalid partial tile removed; rerun to download {path.name}"
-                )
-            partial.replace(path)
-            return path
-        response.raise_for_status()
-        if response.status_code == 206:
-            match = re.fullmatch(
-                r"bytes (\d+)-(\d+)/(\d+)", response.headers.get("Content-Range", "")
-            )
-            if not match or int(match[1]) != offset:
-                raise ValueError("Server returned an inconsistent download range")
-            total = int(match[3])
-        else:
-            # If Range is ignored, start over rather than appending a full file.
-            offset = 0
-            total = int(response.headers.get("Content-Length", 0)) or None
-        with (
-            partial.open("ab" if offset else "wb") as output,
-            tqdm(
-                total=total,
-                initial=offset,
-                unit="B",
-                unit_scale=True,
-                desc=f"Download {record['field']}{record['tile']}",
-                leave=False,
-            ) as progress,
-        ):
-            for chunk in response.iter_content(1024 * 1024):
-                output.write(chunk)
-                progress.update(len(chunk))
-        if total is not None and partial.stat().st_size != total:
-            raise ValueError(f"Incomplete download retained for resumption: {partial}")
+    status(f"Connecting {label}")
     try:
+        response_context = session.get(
+            record["download_url"], headers=headers, stream=True
+        )
+        with response_context as response:
+            response.raise_for_status()
+            total = int(response.headers.get("Content-Length", 0)) or None
+            with (
+                partial.open("wb") as output,
+                progress_factory(
+                    total=total,
+                    initial=0,
+                    unit="B",
+                    unit_scale=True,
+                    desc=f"Download {record['field']}{record['tile']}",
+                    position=2,
+                    leave=False,
+                ) as progress,
+            ):
+                for chunk in response.iter_content(1024 * 1024):
+                    output.write(chunk)
+                    progress.update(len(chunk))
+            if total is not None and partial.stat().st_size != total:
+                raise ValueError(f"Incomplete download: {partial}")
+    except (RequestException, ValueError):
+        partial.unlink(missing_ok=True)
+        raise
+    try:
+        status(f"Checking downloaded {label}")
         validate_tile(partial, record["filename"])
     except (OSError, ValueError):
         partial.unlink(missing_ok=True)
@@ -442,6 +442,7 @@ def process_tile(
     pending = []
     with fits.open(path, memmap=True, character_as_bytes=True) as hdus:
         data = hdus[1].data
+        tqdm.write(f"Grouping sources in {record['field']}{record['tile']}")
         groups = source_groups(data["SOURCE_ID"])
         ids = {source_id for source_id, _ in groups}
         if not set(saved) <= ids:
@@ -451,6 +452,7 @@ def process_tile(
             total=len(groups),
             initial=done,
             desc=f"Sources {record['field']}{record['tile']}",
+            position=1,
             leave=False,
         ) as progress:
             unfinished = [
@@ -596,8 +598,10 @@ def run(args):
             records = manifest.to_dict("records")
             with (
                 get_context("spawn").Pool(WORKERS) as pool,
+                tqdm(
+                    total=len(manifest), initial=len(done), desc="Tiles", position=0
+                ) as progress,
                 TilePrefetch(records, done, data_dir, args.max_tiles) as prefetch,
-                tqdm(total=len(manifest), initial=len(done), desc="Tiles") as progress,
             ):
                 for record in records:
                     was_done = record["dp_id"] in done

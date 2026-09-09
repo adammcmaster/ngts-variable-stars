@@ -157,7 +157,7 @@ All results and checkpoints are under `data/classifications/upsilon-t/`:
 Each source's features are committed before inference; predictions are committed
 individually. Rerunning the **same command automatically resumes**: completed
 sources are skipped, extracted features awaiting prediction are reused, and
-partial downloads use HTTP range requests. A tile is marked complete only after
+incomplete tile downloads are discarded and restarted. A tile is marked complete only after
 all its sources have a recorded outcome and its Parquet export is saved. Completed
 tile files are then deleted from the cache; use `--keep-tiles` to retain them.
 The SQLite database includes results for the current incomplete tile, even before
@@ -205,7 +205,10 @@ It runs on CPU, with Numba accelerating the numerical loops. The first invocatio
 may spend a few seconds compiling those loops.
 
 Norton uses eight source-classification processes and one download process to
-prefetch the next tile. Each classification process writes durable candidate
+prefetch the next tile. Both scripts render Tiles, Sources, and Download progress
+in the main process. The download display also shows connection and FITS
+validation stages, before classification can begin. An unresponsive connection
+is retried after 60 seconds from the beginning. Each classification process writes durable candidate
 checkpoints through its own SQLite connection.
 
 Like the UPSILoN-T script, it reads the tile manifest, defaults to 5-minute flux

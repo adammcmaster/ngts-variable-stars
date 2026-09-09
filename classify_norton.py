@@ -122,6 +122,7 @@ def analyse_source(db, record, source_id, rows, config, saved=None, show_progres
             total=len(payload["candidates"]),
             initial=payload["next_candidate"],
             desc=f"Refine {source_id}",
+            position=3,
             disable=not show_progress,
             leave=False,
         ) as progress:
@@ -335,6 +336,7 @@ def process_tile(
     processed = 0
     with fits.open(path, memmap=True, character_as_bytes=True) as hdus:
         data = hdus[1].data
+        tqdm.write(f"Grouping sources in {record['field']}{record['tile']}")
         groups = source_groups(data["SOURCE_ID"])
         if not set(saved) <= {source_id for source_id, _ in groups}:
             raise ValueError("Checkpoint sources do not match the cached tile")
@@ -343,6 +345,7 @@ def process_tile(
             total=len(groups),
             initial=done,
             desc=f"Sources {record['field']}{record['tile']}",
+            position=1,
             leave=False,
         ) as progress:
             unfinished = [
@@ -469,8 +472,10 @@ def run(args):
             ]
             with (
                 get_context("spawn").Pool(WORKERS) as pool,
+                tqdm(
+                    total=len(manifest), initial=len(done), desc="Tiles", position=0
+                ) as progress,
                 TilePrefetch(records, done, data_dir, args.max_tiles) as prefetch,
-                tqdm(total=len(manifest), initial=len(done), desc="Tiles") as progress,
             ):
                 for record in records:
                     was_done = record["dp_id"] in done

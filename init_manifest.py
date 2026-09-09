@@ -39,6 +39,8 @@ class ArchiveSession(requests.Session):
         super().__init__()
         retries = Retry(
             total=4,
+            connect=4,
+            read=0,
             backoff_factor=1,
             status_forcelist=(429, 500, 502, 503, 504),
         )
@@ -46,7 +48,9 @@ class ArchiveSession(requests.Session):
         self.headers["User-Agent"] = "ngts-variable-stars/0.1 (DR2 catalogue setup)"
 
     def request(self, method, url, **kwargs):
-        kwargs.setdefault("timeout", (30, 180))
+        # Keeping the read timeout bounded prevents an unresponsive server from
+        # looking like a multiprocessing deadlock.
+        kwargs.setdefault("timeout", (30, 60))
         return super().request(method, url, **kwargs)
 
 

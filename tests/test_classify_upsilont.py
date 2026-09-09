@@ -189,7 +189,7 @@ def test_bad_predictions_do_not_erase_features(tmp_path, config):
     db.close()
 
 
-def test_download_resumes_partial_bytes(tmp_path):
+def test_download_discards_partial_bytes_and_starts_over(tmp_path):
     from io import BytesIO
 
     import requests
@@ -211,14 +211,10 @@ def test_download_resumes_partial_bytes(tmp_path):
     }
 
     class Response:
-        def __init__(self, offset, fail):
-            self.status_code = 206 if offset else 200
-            self.headers = {"Content-Length": str(len(content) - offset)}
-            if offset:
-                self.headers["Content-Range"] = (
-                    f"bytes {offset}-{len(content) - 1}/{len(content)}"
-                )
-            self.offset, self.fail = offset, fail
+        def __init__(self, fail):
+            self.status_code = 200
+            self.headers = {"Content-Length": str(len(content))}
+            self.fail = fail
 
         def __enter__(self):
             return self
@@ -233,7 +229,7 @@ def test_download_resumes_partial_bytes(tmp_path):
             if self.fail:
                 yield content[:1000]
                 raise requests.ConnectionError("connection lost")
-            yield content[self.offset :]
+            yield content
 
     class Session:
         def __init__(self):
@@ -241,16 +237,18 @@ def test_download_resumes_partial_bytes(tmp_path):
 
         def get(self, url, headers, stream):
             self.calls.append(headers.copy())
-            return Response(1000 if "Range" in headers else 0, len(self.calls) == 1)
+            return Response(len(self.calls) == 1)
 
     session = Session()
+    path = tmp_path / record["cache_path"]
+    path.parent.mkdir(parents=True)
+    path.with_name(path.name + ".part").write_bytes(b"stale partial")
     with pytest.raises(requests.ConnectionError):
         classifier.cache_tile(session, record, tmp_path)
-    path = tmp_path / record["cache_path"]
     assert not path.exists()
-    assert path.with_name(path.name + ".part").stat().st_size == 1000
+    assert not path.with_name(path.name + ".part").exists()
     assert classifier.cache_tile(session, record, tmp_path) == path
-    assert session.calls[1]["Range"] == "bytes=1000-"
+    assert all("Range" not in headers for headers in session.calls)
     assert path.read_bytes() == content
     assert not path.with_name(path.name + ".part").exists()
 
